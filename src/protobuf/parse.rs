@@ -1,4 +1,6 @@
 use crate::compiler::prelude::*;
+use crate::protobuf::get_message_descriptor;
+use std::path::PathBuf;
 use prost_reflect::ReflectMessage;
 use prost_reflect::{DynamicMessage, MessageDescriptor};
 
@@ -42,6 +44,19 @@ pub fn proto_to_value(
             }
         }
         prost_reflect::Value::Message(v) => {
+            if let Some(type_url_cow) = v.get_field_by_name("type_url") {
+                if let Some(value_cow) = v.get_field_by_name("value") {
+                    if let prost_reflect::Value::String(type_url) = &*type_url_cow {
+                        if let prost_reflect::Value::Bytes(value) = &*value_cow {
+                            let message_descriptor = load_descriptor_from_type_url(&type_url)?;
+                            let dynamic_message = DynamicMessage::decode(message_descriptor, value.clone())
+                                .map_err(|error| format!("Error parsing embedded protobuf message: {:?}", error))?;
+                            return proto_to_value(&prost_reflect::Value::Message(dynamic_message), None);
+                        }
+                    }
+                }
+            }
+
             let mut obj_map = ObjectMap::new();
             for field_desc in v.descriptor().fields() {
                 if v.has_field(&field_desc) {
@@ -91,6 +106,13 @@ pub fn proto_to_value(
         }
     };
     Ok(vrl_value)
+}
+
+fn load_descriptor_from_type_url(type_url: &str) -> std::result::Result<MessageDescriptor, String> {
+    let type_name = type_url.trim_start_matches("type.googleapis.com/");
+    let path = format!("{}.desc", type_name.replace('.', "/"));
+    get_message_descriptor(&PathBuf::from(path), type_name)
+        .map_err(|e| format!("Failed to load descriptor for {}: {}", type_url, e))
 }
 
 pub(crate) fn parse_proto(descriptor: &MessageDescriptor, value: Value) -> Resolved {
